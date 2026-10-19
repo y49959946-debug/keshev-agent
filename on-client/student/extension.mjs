@@ -102,7 +102,65 @@ export function createStudentView() {
 
       return root;
     },
-    renderDecision() { return '학생 구현 대기: 서버의 판정과 이유를 연결하세요.'; },
+    renderDecision({ status, mode, data, error, appId } = {}) {
+      const root = document.createElement('section');
+      root.setAttribute('aria-label', '업무 앱 접근 판정');
+
+      const text = (tag, value) => {
+        const node = document.createElement(tag);
+        node.textContent = String(value);
+        root.appendChild(node);
+        return node;
+      };
+      const valueText = (value) => typeof value === 'string' && value.length > 0 ? value : '확인 불가';
+      const modeText = ({
+        connected: '연결됨 (connected)',
+        demo: '예제 자료 (demo)',
+        disconnected: '연결 없음 (disconnected)',
+        unknown: '확인 불가 (unknown)',
+      })[mode] || '확인 불가 (unknown)';
+      const DECISION_TEXT = {
+        allow: { label: '허용 (allow)', note: '정책상 접근이 허용되었습니다. 실제 앱 접속 성공을 보장하지는 않습니다.' },
+        deny: { label: '거부 (deny)', note: '정책상 접근이 거부되었습니다.' },
+        challenge: { label: '추가 확인 필요 (challenge)', note: '추가 인증 또는 확인이 필요합니다. 이 화면은 확인 절차를 대신 수행하지 않습니다.' },
+        unknown: { label: '확인 불가 (unknown)', note: '판정을 확인할 수 없습니다. 접근이 허용되지 않은 것으로 다룹니다.' },
+      };
+
+      text('h3', '업무 앱 접근 판정');
+      if (typeof mode === 'string' && mode.length > 0) text('p', `자료 모드: ${modeText}`);
+
+      if (status === 'idle') {
+        text('p', '앱을 골라 접속을 요청하세요.');
+        return root;
+      }
+      if (status === 'loading') {
+        text('p', `대상 앱: ${valueText(appId)}`);
+        text('p', '판정 확인 중');
+        return root;
+      }
+      if (status === 'error') {
+        text('p', `대상 앱: ${valueText(appId)}`);
+        text('p', `요청 실패: ${valueText(error?.message)}`);
+        text('p', '서버의 판정을 받지 못했습니다. 접근 거부 판정이 아니며, 접근이 허용된 것도 아닙니다.');
+        return root;
+      }
+      if (status === 'ok' && data && typeof data === 'object') {
+        const known = Object.hasOwn(DECISION_TEXT, data.decision);
+        const shown = known
+          ? DECISION_TEXT[data.decision]
+          : { label: `확인 불가 (unknown, 받은 값: ${valueText(data.decision)})`, note: DECISION_TEXT.unknown.note };
+        text('p', `대상 앱: ${valueText(data.appId ?? appId)}`);
+        text('p', `판정: ${shown.label}`);
+        text('p', shown.note);
+        text('p', `판정 이유: ${valueText(data.reason)}`);
+        text('p', `판정 시각: ${valueText(data.checkedAt)}`);
+        return root;
+      }
+
+      text('p', `대상 앱: ${valueText(appId)}`);
+      text('p', '판정: 확인 불가 (unknown) — 판정 자료를 확인할 수 없습니다. 접근이 허용되지 않은 것으로 다룹니다.');
+      return root;
+    },
     renderEvents() { return '학생 구현 대기: 본인 접속·XDR 기록을 연결하세요.'; },
     renderStatus() { return '학생 구현 대기: 기기·세션·알림과 연결 점검 상태를 구분하세요.'; },
     renderVulnerabilities() { return '학생 구현 대기: 정확한 설치 버전·OSV 출처·조회 시각·부분 결과·조회 실패를 구분하세요.'; },

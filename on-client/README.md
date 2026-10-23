@@ -36,3 +36,4 @@ npm start도 같은 서버를 켭니다. 기본 실행은 실제 회사 시스�
 - **지원 환경과 버전**: Windows PowerShell(작성자 PC 5.1.26100.9711), Node.js 22~24(기준 24.19.0, `package.json`의 `engines`, 작성자 PC v24.19.0), 외부 npm 패키지 없음, 시작 틀 `alekov-client-starter` 0.2.11.
 - **실행**: 앱 폴더(`on-client`)에서 `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\start-alekov.ps1` → 브라우저 `http://127.0.0.1:5189/`.
 - **확인 범위**: 기본 실행(연결 없음)과 예제 모드(`-Demo`)는 화면에서 확인했습니다. 실제 SDP·계정·AI·조치·OSV 연결은 설정이 준비되지 않아 확인하지 못했습니다.
+- **릴리스·재현 기록**: 새 폴더 재현 결과, 13~21단계 결과표, 데이터 보존 계획, 지원 범위와 미해결 사항은 [docs/RELEASE_RECORD.md](docs/RELEASE_RECORD.md)에 있습니다. 현재 버전은 실제 연결이 남아 있는 검증 중인 버전입니다.

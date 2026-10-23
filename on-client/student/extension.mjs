@@ -470,7 +470,106 @@ export function createStudentView() {
 
       return root;
     },
-    renderVulnerabilities() { return '학생 구현 대기: 정확한 설치 버전·OSV 출처·조회 시각·부분 결과·조회 실패를 구분하세요.'; },
+    renderVulnerabilities({ status, mode, data, error } = {}) {
+      // 20단계: 설치된 정확한 패키지 버전과 OSV 조회 결과·미조회·일부 실패를 구분해 보여 줍니다.
+      // 호출마다 새 요소를 만들므로 조회 중·오류·취소 때 이전 표가 현재 결과처럼 남지 않습니다.
+      const root = document.createElement('section');
+      root.setAttribute('aria-label', '설치 패키지와 알려진 취약점 조회 결과');
+      const add = (parent, tag, value) => {
+        const node = document.createElement(tag);
+        if (value !== undefined) node.textContent = String(value);
+        parent.appendChild(node);
+        return node;
+      };
+      const text = (value) => (typeof value === 'string' && value.length > 0 ? value : '확인 불가');
+      const safeCode = (value) => (typeof value === 'string' && /^[A-Z0-9_]{1,64}$/u.test(value) ? value : 'CONTRACT_MISMATCH');
+      // 정확한 버전(예: 1.2.3)만 설치 버전으로 씁니다. ^1.2.0 같은 범위 표기는 설치 버전으로 표시하지 않습니다.
+      const EXACT = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u;
+      const NOT_SAFE = '조회되지 않았거나 확인할 수 없는 패키지는 "취약점 없음"이 아닙니다.';
+      const SCAN_TEXT = {
+        complete: '모두 조회(complete): 조회 대상 패키지를 모두 OSV와 대조했습니다.',
+        partial: '일부 조회 실패(partial): 일부 패키지만 조회됐습니다. 이미 받은 취약점 ID는 그대로 보여 줍니다.',
+        not_checked: '아직 조회 안 함(not_checked): 담당자가 승인한 공개 조회 대상 패키지가 없어 조회하지 않았습니다.',
+        not_configured: '조회 준비 미완료(not_configured): 조회 대상 프로젝트 설정이 필요합니다. 담당자가 준비하는 설정입니다.',
+        unverifiable: 'lock 파일 확인 불가(unverifiable): package-lock.json 을 확인할 수 없어 조회하지 않았습니다.',
+      };
+      const PACKAGE_TEXT = {
+        known_vulnerabilities: '알려진 항목 있음(known_vulnerabilities)',
+        none_found: '알려진 항목 없음(none_found): 조회 시점의 OSV 조회 범위에서 알려진 항목이 없다는 뜻이며, 안전을 보장하지 않습니다.',
+        unverifiable: '조회 확인 불가(unverifiable)',
+      };
+
+      add(root, 'h3', '설치 패키지와 알려진 취약점(OSV)');
+      if (typeof mode === 'string' && mode.length > 0) add(root, 'p', `자료 모드: ${mode}`);
+
+      if (status === 'idle' || status === undefined) {
+        add(root, 'p', '조회 전: 아직 설치 패키지를 조회하지 않았습니다. 제공 화면의 「설치 패키지 조회」를 직접 누르세요.');
+        return root;
+      }
+      if (status === 'loading') {
+        add(root, 'p', '조회 중: 결과가 오기 전까지 이전 결과는 현재 결과가 아닙니다.');
+        return root;
+      }
+      if (status === 'error') {
+        const code = safeCode(error?.code);
+        const cancelled = code === 'CANCELLED' || code === 'REQUEST_CANCELLED';
+        add(root, 'p', `${cancelled ? '조회 취소' : '조회 실패'} (${code}): ${text(error?.message)}`);
+        add(root, 'p', `이 결과는 취약점 없음·정상·안전이 아닙니다. 이전 결과도 현재 결과로 보지 않습니다. ${NOT_SAFE}`);
+        add(root, 'p', '다시 조회하려면 제공 화면의 「설치 패키지 조회」를 직접 누르세요. 자동으로 다시 조회하지 않습니다.');
+        return root;
+      }
+      if (status !== 'ok' || !data || typeof data !== 'object') {
+        add(root, 'p', '조회 결과 확인 불가: 결과 형식을 확인할 수 없습니다. 취약점 없음으로 보지 않습니다.');
+        return root;
+      }
+
+      // 전체 결과: package-lock.json 과 설치된 node_modules 메타데이터를 대조한 값
+      add(root, 'p', `전체 조회 상태: ${SCAN_TEXT[data.status] || `확인 불가(${text(String(data.status ?? ''))})`}`);
+      if (data.status !== 'complete' && data.status !== 'partial') add(root, 'p', NOT_SAFE);
+      const summary = add(root, 'ul');
+      add(summary, 'li', '기준: package-lock.json 과 설치된 node_modules 메타데이터를 대조한 정확한 설치 버전');
+      if (data.lockfileVersion !== undefined) add(summary, 'li', `lockfileVersion: ${data.lockfileVersion}`);
+      if (data.lockfileHash !== undefined) add(summary, 'li', `lockfileHash: ${text(data.lockfileHash)}`);
+      if (data.checkedAt !== undefined) add(summary, 'li', `조회 시각(checkedAt): ${text(data.checkedAt)}`);
+      if (typeof data.code === 'string') add(summary, 'li', `상태 코드: ${safeCode(data.code)}`);
+      if (Number.isSafeInteger(data.excluded?.count)) add(summary, 'li', `조회 대상에서 제외된 패키지: ${data.excluded.count}개(승인되지 않았거나 공개 조회할 수 없는 패키지는 밖으로 보내지 않음)`);
+
+      const packages = Array.isArray(data.packages) ? data.packages : [];
+      if (packages.length === 0) {
+        add(root, 'p', data.status === 'complete'
+          ? '조회 대상 패키지가 0개입니다.'
+          : '표시할 패키지 행이 없습니다(미조회·설정 필요·확인 불가 상태).');
+        return root;
+      }
+
+      const table = add(root, 'table');
+      const head = add(add(table, 'thead'), 'tr');
+      for (const label of ['패키지(name)', '설치 버전(version)', '조회 상태(status)', '취약점 ID · 수정 시각(modified)', '출처(source)', '패키지 조회 시각(checkedAt)']) add(head, 'th', label);
+      const body = add(table, 'tbody');
+      for (const pkg of packages) {
+        const exact = typeof pkg?.version === 'string' && EXACT.test(pkg.version);
+        const row = add(body, 'tr');
+        row.setAttribute('data-student-package-name', text(pkg?.name));
+        row.setAttribute('data-student-package-version', exact ? pkg.version : '확인 불가');
+        add(row, 'td', text(pkg?.name));
+        add(row, 'td', exact ? `${pkg.version} (설치된 정확한 버전)` : `확인 불가(정확한 설치 버전 아님: ${text(pkg?.version)})`);
+        const findings = Array.isArray(pkg?.vulnerabilities) ? pkg.vulnerabilities : [];
+        const statusText = pkg?.status === 'unverifiable' && findings.length > 0
+          ? '일부 확인·전체 조회 확인 불가(unverifiable): 받은 취약점 ID는 그대로 보여 주며, 나머지는 확인하지 못했습니다.'
+          : PACKAGE_TEXT[pkg?.status] || `확인 불가(${text(String(pkg?.status ?? ''))})`;
+        add(row, 'td', statusText);
+        const cell = add(row, 'td');
+        if (findings.length === 0) cell.textContent = pkg?.status === 'none_found' ? '없음(조회 범위 기준)' : '확인 불가';
+        else {
+          const list = add(cell, 'ul');
+          for (const finding of findings) add(list, 'li', `${text(finding?.id)} · 수정 시각 ${text(finding?.modified)}`);
+        }
+        add(row, 'td', text(pkg?.source));
+        add(row, 'td', text(pkg?.checkedAt));
+      }
+      add(root, 'p', 'OSV는 알려진 취약점 데이터베이스입니다. 조회 결과가 없다는 사실만으로 패키지나 앱 전체가 안전하다고 보장할 수 없습니다.');
+      return root;
+    },
     renderAiConnection({ status, mode, data, error, checkedAt, explanationAccepted } = {}) {
       // 호출마다 새 요소를 만듭니다. 다시 점검에 성공하거나 idle 로 돌아오면 이전 결과·오류는 남지 않습니다.
       const root = document.createElement('section');

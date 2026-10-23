@@ -672,6 +672,102 @@ export function createStudentView() {
       add(root, 'p', 'AI 설명과 제안만으로는 보안 조치가 실행되지 않습니다.');
       return root;
     },
-    renderAction() { return '학생 구현 대기: 현재 사건·조치·실제 대상·사람 확인·ACK와 원천 효과·unknown을 구분하세요.'; },
+    renderAction({ status, event, actionId, target, receipt, observation, message, confirmationExpiresAt, error } = {}) {
+      // 19단계: AI 제안·사람 확인·서버 접수(ACK)·실제 효과 관측을 구분해 보여 줍니다.
+      // 학생 코드는 버튼·요청·확인 티켓을 만들지 않습니다. 조치는 제공 화면 버튼으로만 진행합니다.
+      // 호출마다 새 요소를 만들므로 새 입력이 오면 이전 대상·요청·결과가 남지 않습니다.
+      const root = document.createElement('section');
+      root.setAttribute('aria-label', '보안 조치 요청 상태');
+      const add = (parent, tag, value) => {
+        const node = document.createElement(tag);
+        if (value !== undefined) node.textContent = String(value);
+        parent.appendChild(node);
+        return node;
+      };
+      const SECRET = /(?:Bearer\s+\S+|sk-[A-Za-z0-9_-]{8,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|(?:api[_ -]?key|authorization|password|token|secret|비밀번호|토큰)\s*[:=]\s*(?:Bearer\s+)?\S+)/giu;
+      const safe = (value) => (typeof value === 'string' && value.length > 0 ? value.replace(SECRET, '[가림]') : '확인 불가');
+      const safeCode = (value) => (typeof value === 'string' && /^[A-Z0-9_]{1,64}$/u.test(value) ? value : 'ACTION_RESULT_UNVERIFIED');
+      const RECHECK = '결과는 제공 화면의 「원천 결과만 재조회」를 직접 눌러 확인하세요. 같은 요청 ID로 결과만 다시 조회하며, 조치를 다시 실행하지 않습니다.';
+      const effectConfirmed = status === 'succeeded' && observation?.effectApplied === true;
+
+      // status 마다 뜻이 다른 문장(원래 값 포함). succeeded 라도 효과 관측이 없으면 결과 불명으로 봅니다.
+      const STATUS_TEXT = {
+        idle: '아직 미실행(idle): 조치 제안을 준비하거나 실행하지 않았습니다.',
+        loading: '조치 준비 또는 결과 조회 중(loading): 아직 결과가 없으며 완료가 아닙니다.',
+        prepared: '준비됨·미실행(prepared): 서버가 조치를 준비만 했고 아직 실행하지 않았습니다.',
+        executing: '서버에 전달 중(executing): 사람 확인 후 서버로 보내는 중이며, 결과는 아직 확인되지 않았습니다. 완료 아님.',
+        pending: '서버 접수·처리 중(pending): 서버가 요청을 받았다는 응답(ACK)일 뿐 실제 효과가 아닙니다. 완료 아님.',
+        succeeded: '효과 확인(succeeded): 연동 시스템이 실제 효과를 관측했습니다.',
+        denied: '거절(denied): 연동 시스템이 이 조치를 거절했습니다.',
+        failed: '실패(failed): 연동 시스템이 조치를 처리하지 못했습니다.',
+        unknown: '결과 불명(unknown): 성공으로도 효과 없음으로도 판단하지 마세요.',
+        expired: '확인 기한 지남(expired): 이번 준비로는 실행할 수 없습니다. 조치를 다시 준비하세요.',
+        error: '요청 처리 안 됨(error): 조치 요청이 처리되지 않았습니다.',
+      };
+      const shownStatus = status === 'succeeded' && !effectConfirmed ? 'unknown' : status;
+
+      add(root, 'h3', '보안 조치 요청 상태');
+      add(root, 'p', `상태: ${STATUS_TEXT[shownStatus] || `확인 불가(${safe(String(status ?? ''))}): 조치 상태를 확인할 수 없습니다. 성공으로 판단하지 마세요.`}`);
+      if (status === 'succeeded' && !effectConfirmed) {
+        add(root, 'p', '서버가 succeeded 로 답했지만 연동 시스템의 효과 관측(effectApplied 가 true)이 없어 효과 확인으로 보지 않습니다.');
+      }
+
+      if (shownStatus === 'idle') {
+        const supported = Array.isArray(event?.supportedActions) ? event.supportedActions : [];
+        add(root, 'p', supported.length === 0
+          ? '지금 기록에는 연동 시스템이 지원하는 조치가 없어(supportedActions 빈 배열) 조치 준비 버튼이 나오지 않는 것이 정상입니다.'
+          : '조치는 AI 설명의 제안에서 제공 화면의 「조치 준비」로만 시작합니다.');
+        add(root, 'p', 'AI 제안만으로는 아무 조치도 실행되지 않습니다.');
+        if (typeof message === 'string' && message.length > 0) add(root, 'p', safe(message));
+        return root;
+      }
+
+      // 현재 의도(사건·근거·조치·대상·요청)를 받은 범위에서만 표시합니다. 값을 만들지 않습니다.
+      const eventId = typeof event?.id === 'string' && event.id.length > 0 ? event.id : null;
+      const requestId = typeof receipt?.requestId === 'string' && receipt.requestId.length > 0 ? receipt.requestId : null;
+      if (eventId) root.setAttribute('data-student-action-event', eventId);
+      if (requestId) root.setAttribute('data-student-action-request', requestId);
+
+      add(root, 'h4', '현재 조치 대상');
+      const intent = add(root, 'ul');
+      if (eventId) add(intent, 'li', `사건 ID: ${eventId}`);
+      const evidenceIds = Array.isArray(event?.evidence) ? event.evidence.map((e) => e?.id).filter((id) => typeof id === 'string') : [];
+      if (evidenceIds.length > 0) add(intent, 'li', `근거 ID: ${evidenceIds.join(', ')}`);
+      if (typeof actionId === 'string' && actionId.length > 0) add(intent, 'li', `조치(actionId): ${safe(actionId)}`);
+      if (target && typeof target === 'object') {
+        add(intent, 'li', `실제 대상(target.id): ${safe(target.id)} · 대상 세대(target.generation): ${Number.isSafeInteger(target.generation) ? target.generation : '확인 불가'}`);
+      }
+      if (receipt && typeof receipt === 'object') {
+        if (requestId) add(intent, 'li', `요청 ID(requestId): ${requestId}`);
+        if (typeof receipt.receiptId === 'string') add(intent, 'li', `접수 번호(receiptId): ${receipt.receiptId}`);
+        if (Number.isSafeInteger(receipt.version)) add(intent, 'li', `버전(version): ${receipt.version}`);
+        if (receipt.replayed === true) add(intent, 'li', '같은 요청의 이전 결과를 돌려받았습니다(replayed: true). 조치가 두 번 실행된 것이 아닙니다.');
+        if (receipt.superseded === true) add(intent, 'li', '이전 조회는 최신 결과를 대신하지 않습니다(superseded).');
+      }
+
+      if (shownStatus === 'prepared') {
+        add(root, 'p', `사람 확인 기한: ${safe(confirmationExpiresAt)}`);
+        add(root, 'p', '실제 대상과 조치를 읽고, 실행하려면 제공 화면의 「대상과 조치를 확인했으며 집행합니다」를 사람이 직접 누르세요. 누르기 전에는 아무것도 실행되지 않습니다.');
+      } else if (shownStatus === 'executing' || shownStatus === 'pending' || shownStatus === 'loading') {
+        add(root, 'p', '아직 실제 효과가 확인되지 않았습니다. 같은 조치를 다시 실행하지 마세요.');
+        if (shownStatus === 'pending') add(root, 'p', RECHECK);
+      } else if (effectConfirmed) {
+        add(root, 'p', `관측 시각(observedAt): ${safe(observation.observedAt)}`);
+        add(root, 'p', 'effectApplied: true');
+        add(root, 'p', `접수 번호(receiptId): ${safe(receipt?.receiptId)}`);
+      } else if (shownStatus === 'denied' || shownStatus === 'failed') {
+        add(root, 'p', `연동 시스템 메시지: ${safe(message || error?.message)}`);
+      } else if (shownStatus === 'unknown') {
+        add(root, 'p', '이미 서버에 전달된 조치의 효과가 없다고 판단하지 마세요. 조치를 다시 실행하지 말고 결과만 재조회하세요.');
+        add(root, 'p', RECHECK);
+        if (error) add(root, 'p', `원인: ${safeCode(error.code)} — ${safe(error.message)}`);
+      } else if (shownStatus === 'expired') {
+        add(root, 'p', '확인 기한이 지나 이번 준비는 쓸 수 없습니다. 제공 화면에서 조치를 다시 준비하고 대상을 다시 확인하세요.');
+      } else if (shownStatus === 'error') {
+        add(root, 'p', `원인: ${safeCode(error?.code)} — ${safe(error?.message)}`);
+      }
+      add(root, 'p', '「조치 화면 취소」는 이 화면을 닫을 뿐, 이미 서버에 전달된 조치의 효과를 되돌리지 않습니다.');
+      return root;
+    },
   };
 }

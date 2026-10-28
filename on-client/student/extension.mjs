@@ -77,7 +77,9 @@ function buildDashboard({ devices, sessions, notifications, mode } = {}) {
   const gb = (bytes) => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
   const time = (iso) => {
     const d = new Date(iso);
-    return Number.isFinite(d.getTime()) ? d.toLocaleTimeString('ko-KR', { hour12: false }) : '시각 확인 불가';
+    if (!Number.isFinite(d.getTime())) return '시각 확인 불가';
+    const two = (n) => String(n).padStart(2, '0');
+    return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
   };
   const REASON = { query_failed: '조회 실패', permission_denied: '권한 없음', timeout: '시간 초과', unsupported: '이 OS에서 지원 안 함', cancelled: '취소됨', invalid_response: '응답 형식 확인 불가', invalid_sample: '표본 확인 불가' };
   const reason = (metric) => REASON[metric?.reason] || '이유 확인 불가';
@@ -150,9 +152,50 @@ function buildDashboard({ devices, sessions, notifications, mode } = {}) {
     else if (notifications.length === 0) add(c4, 'p', '주의할 알림 없음(조회한 범위 안에서)', 'muted');
   }
 
+  // 원형 게이지: 지금 사용률(CPU·메모리·디스크) [실측]. SVG 도형을 DOM으로 그립니다(innerHTML·style 속성 없음).
+  const gauges = add(box, 'section');
+  gauges.setAttribute('aria-label', '지금 사용률 원형 그래프');
+  const gh = add(gauges, 'h4', '지금 사용률 ');
+  add(gh, 'span', '실측', 'tag');
+  if (!m) add(gauges, 'p', pc.status === 'loading' ? '내 PC 값을 읽는 중' : '아직 실측이 없습니다.');
+  else {
+    const NS = 'http://www.w3.org/2000/svg';
+    const svgEl = (parent, tag, attrs) => {
+      const node = document.createElementNS(NS, tag);
+      for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
+      parent.appendChild(node);
+      return node;
+    };
+    const colorFor = (v) => (v >= 85 ? '#d64545' : v >= 60 ? '#e0a100' : '#2bb3a3');
+    const ring = add(gauges, 'div', undefined, 'row');
+    ring.setAttribute('role', 'list');
+    const gauge = (label, value, detail) => {
+      const fig = add(ring, 'div');
+      fig.setAttribute('role', 'listitem');
+      const size = 112, r = 44, c = 2 * Math.PI * r;
+      const svg = svgEl(fig, 'svg', { width: size, height: size, viewBox: `0 0 ${size} ${size}`, role: 'img', 'aria-label': value === null ? `${label} 확인 불가` : `${label} ${value.toFixed(1)}% 사용` });
+      svgEl(svg, 'circle', { cx: size / 2, cy: size / 2, r, fill: 'none', stroke: '#e3ecea', 'stroke-width': 12 });
+      if (value !== null) {
+        const v = Math.max(0, Math.min(100, value));
+        svgEl(svg, 'circle', { cx: size / 2, cy: size / 2, r, fill: 'none', stroke: colorFor(v), 'stroke-width': 12, 'stroke-linecap': 'round', 'stroke-dasharray': `${(c * v / 100).toFixed(2)} ${c.toFixed(2)}`, transform: `rotate(-90 ${size / 2} ${size / 2})` });
+      }
+      const t = svgEl(svg, 'text', { x: '50%', y: '50%', 'text-anchor': 'middle', 'dominant-baseline': 'central', 'font-size': 18, 'font-weight': 600, fill: 'currentColor' });
+      t.textContent = value === null ? '—' : `${Math.round(value)}%`;
+      const cap = add(fig, 'div', label);
+      if (detail) add(cap, 'div', detail, 'muted');
+    };
+    const cpuV = m.cpu?.state === 'ok' && Number.isFinite(m.cpu.usagePercent) ? m.cpu.usagePercent : null;
+    gauge('CPU', cpuV, cpuV === null ? `확인 불가 — ${reason(m.cpu)}` : '짧은 구간 측정값');
+    const memV = m.memory?.state === 'ok' && m.memory.totalBytes > 0 ? 100 * m.memory.usedBytes / m.memory.totalBytes : null;
+    gauge('메모리', memV, memV === null ? `확인 불가 — ${reason(m.memory)}` : `${gb(m.memory.usedBytes)} / ${gb(m.memory.totalBytes)}`);
+    const diskV = m.disk?.state === 'ok' && m.disk.totalBytes > 0 ? 100 * (m.disk.totalBytes - m.disk.freeBytes) / m.disk.totalBytes : null;
+    gauge('디스크', diskV, diskV === null ? `확인 불가 — ${reason(m.disk)}` : `여유 ${gb(m.disk.freeBytes)} / ${gb(m.disk.totalBytes)}`);
+    add(gauges, 'p', `색: 60% 미만 청록 · 60% 이상 노랑 · 85% 이상 빨강(사용률 구간일 뿐 위험 판정이 아닙니다). 마지막 실측 ${time(pc.data.measuredAt)}`, 'muted');
+  }
+
   // 조작: 내 PC 다시 읽기 / 자동 읽기
   const row = add(box, 'div', undefined, 'row');
-  const reload = add(row, 'button', pc.status === 'loading' ? '읽는 중…' : '내 PC 다시 읽기');
+  const reload = add(row, 'button', pc.status === 'loading' ? '읽는 중…' : '내 PC 다시 읽기', 'btn');
   reload.type = 'button';
   reload.dataset.dashFocus = 'reload';
   if (pc.status === 'loading') { reload.setAttribute('aria-disabled', 'true'); reload.setAttribute('aria-busy', 'true'); }
@@ -166,31 +209,56 @@ function buildDashboard({ devices, sessions, notifications, mode } = {}) {
   autoLabel.appendChild(document.createTextNode(` ${DASH_AUTO_MS / 1000}초마다 내 PC 읽기 (앱 탭이 보일 때만)`));
   auto.addEventListener('change', () => { dashState.focusKey = 'auto'; dashSetAuto(auto.checked); dashRefresh(); });
 
-  // 2) 추이: 이번에 앱을 켠 뒤 읽은 최근 실측
+  // 2) 추이: 이번에 앱을 켠 뒤 읽은 최근 실측 — 요약 한 줄씩 + 표(최근 5회, 나머지는 펼쳐 보기)
   const trend = add(box, 'section');
   trend.setAttribute('aria-label', '내 PC 실측 추이');
-  add(trend, 'h4', `추이 — 최근 실측 ${dashState.history.length}회 [실측]`);
-  if (dashState.history.length === 0) add(trend, 'p', '아직 실측 기록이 없습니다.');
+  const head = add(trend, 'h4', '추이 ');
+  add(head, 'span', '실측', 'tag');
+  const hist = [...dashState.history].reverse();
+  if (hist.length === 0) add(trend, 'p', '아직 실측 기록이 없습니다. 「내 PC 다시 읽기」를 누르면 쌓입니다.');
   else {
-    const ol = add(trend, 'ol');
-    for (const h of [...dashState.history].reverse()) {
-      const li = add(ol, 'li');
-      add(li, 'span', `${time(h.at)} · CPU `);
-      if (h.cpu === null) add(li, 'span', '확인 불가');
-      else {
-        const mt = add(li, 'meter');
-        mt.min = 0; mt.max = 100; mt.value = h.cpu;
-        mt.setAttribute('aria-label', `CPU ${h.cpu}%`);
-        add(li, 'span', ` ${h.cpu}%`);
+    const pct = (v) => (v === null ? '확인 불가' : `${v.toFixed(1)}%`);
+    const stat = (key) => {
+      const vals = hist.map((h) => h[key]).filter((v) => v !== null);
+      if (!vals.length) return '확인 불가';
+      const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+      return `지금 ${pct(hist[0][key])} · 평균 ${pct(avg)} · 최고 ${pct(Math.max(...vals))}`;
+    };
+    const kv = add(trend, 'dl', undefined, 'kv');
+    add(kv, 'dt', 'CPU');
+    add(kv, 'dd', stat('cpu'));
+    add(kv, 'dt', '메모리');
+    add(kv, 'dd', stat('mem'));
+    add(kv, 'dt', '범위');
+    add(kv, 'dd', `${time(hist[hist.length - 1].at)} ~ ${time(hist[0].at)} · ${hist.length}회`);
+
+    const table = (rows, caption) => {
+      const wrap = add(trend, 'div', undefined, 'vulnerabilities-result');
+      const t = add(wrap, 'table');
+      add(t, 'caption', caption, 'muted');
+      const hr = add(add(t, 'thead'), 'tr');
+      for (const h of ['시각', 'CPU', '메모리']) add(hr, 'th', h).setAttribute('scope', 'col');
+      const body = add(t, 'tbody');
+      for (const h of rows) {
+        const tr = add(body, 'tr');
+        add(tr, 'td', time(h.at));
+        for (const [key, label] of [['cpu', 'CPU'], ['mem', '메모리']]) {
+          const td = add(tr, 'td');
+          if (h[key] === null) { add(td, 'span', '확인 불가'); continue; }
+          add(td, 'span', `${pct(h[key])} `);
+          const mt = add(td, 'meter');
+          mt.min = 0; mt.max = 100; mt.low = 60; mt.high = 85; mt.optimum = 0; mt.value = h[key];
+          mt.setAttribute('aria-label', `${label} ${pct(h[key])}`);
+        }
       }
-      add(li, 'span', ' · 메모리 ');
-      if (h.mem === null) add(li, 'span', '확인 불가');
-      else {
-        const mm = add(li, 'meter');
-        mm.min = 0; mm.max = 100; mm.value = h.mem;
-        mm.setAttribute('aria-label', `메모리 ${h.mem}%`);
-        add(li, 'span', ` ${h.mem}%`);
-      }
+      return wrap;
+    };
+    table(hist.slice(0, 5), '최근 실측(새것부터)');
+    if (hist.length > 5) {
+      const more = add(trend, 'details');
+      add(more, 'summary', `이전 실측 ${hist.length - 5}회 더 보기`);
+      const w = table(hist.slice(5), '이전 실측');
+      more.appendChild(w);
     }
   }
   add(trend, 'p', `앱 화면 메모리에만 최대 ${DASH_HISTORY_MAX}회 보관합니다. 새로 고침하면 사라지고, 어디에도 저장·전송하지 않습니다.`, 'muted');

@@ -1,5 +1,6 @@
 {
   "schema": "alekov.student-appearance.v1",
   "appName": "Veil",
-  "icon": "brand-icon.png"
+  "icon": "brand-icon.png",
+  "dashboardPreset": "student-first"
 }

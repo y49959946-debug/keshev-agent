@@ -3,7 +3,229 @@
 // 15단계 renderEvents 필터 상태. 다시 불러와도 고른 필터는 유지하고, 새 자료에 없는 값이면 all 로 되돌립니다.
 const eventFilterState = { kind: 'all', appId: 'all', access: 'all' };
 
-export function createStudentView() {
+// ---------- 마무리: 관제 대시보드(학생 상태 칸 맨 위) ----------
+// 상태 카드 4개(2×2) + 내 PC 실측 추이 + 최근 기록. 제공 화면 틀은 바꾸지 않고 renderStatus 칸 안에만 그립니다.
+// 값 표기: [실측] 이 PC에서 잰 값 · [예시] 예제(demo) 자료 · [미연결] 서버에 연결되지 않음 · [확인 불가] 읽지 못함.
+// 내 PC 실측은 허용된 읽기 전용 주소(/api/pc/status)만 api.get 으로 읽습니다. 바꾸거나 외부로 보내지 않습니다.
+const DASH_HISTORY_MAX = 10;
+const DASH_AUTO_MS = 15000;
+const dashState = {
+  pc: { status: 'idle', data: null, error: null },
+  history: [],
+  auto: false,
+  timer: null,
+  focusKey: null,
+};
+let dashApi = null;
+let dashOnChange = () => {};
+
+function dashRefresh() {
+  try { dashOnChange(); } catch { /* 제공 화면이 다시 그리지 못해도 대시보드는 다음 그리기에서 반영됩니다. */ }
+}
+
+async function dashLoadPc() {
+  if (!dashApi || typeof dashApi.get !== 'function') {
+    dashState.pc = { status: 'error', data: null, error: { code: 'NO_API', message: '이 실행에서는 학생 조회 기능을 받지 못했습니다.' } };
+    dashRefresh();
+    return;
+  }
+  if (dashState.pc.status === 'loading') return;
+  dashState.pc = { ...dashState.pc, status: 'loading' };
+  dashRefresh();
+  let result;
+  try { result = await dashApi.get('/api/pc/status'); } catch { result = { ok: false, error: { code: 'REQUEST_FAILED', message: '조회 중 오류가 났습니다.' } }; }
+  if (result && result.ok === true && result.data && typeof result.data === 'object' && result.data.metrics) {
+    const data = result.data;
+    dashState.pc = { status: 'ok', data, error: null };
+    const m = data.metrics;
+    const cpu = m.cpu?.state === 'ok' && Number.isFinite(m.cpu.usagePercent) ? m.cpu.usagePercent : null;
+    const mem = m.memory?.state === 'ok' && m.memory.totalBytes > 0 ? Math.round(1000 * m.memory.usedBytes / m.memory.totalBytes) / 10 : null;
+    dashState.history.push({ at: data.measuredAt, cpu, mem });
+    if (dashState.history.length > DASH_HISTORY_MAX) dashState.history.splice(0, dashState.history.length - DASH_HISTORY_MAX);
+  } else {
+    const err = result?.error || {};
+    dashState.pc = { status: 'error', data: dashState.pc.data, error: { code: typeof err.code === 'string' ? err.code : 'UNKNOWN_ERROR', message: typeof err.message === 'string' ? err.message : '응답을 확인할 수 없습니다.' } };
+  }
+  dashRefresh();
+}
+
+function dashSetAuto(on) {
+  dashState.auto = on;
+  if (dashState.timer) { clearInterval(dashState.timer); dashState.timer = null; }
+  if (on) {
+    dashState.timer = setInterval(() => {
+      // 앱 탭이 보일 때만 읽습니다(제공 「10초마다 확인」과 같은 원칙).
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      dashLoadPc();
+    }, DASH_AUTO_MS);
+  }
+}
+
+function buildDashboard({ devices, sessions, notifications, mode } = {}) {
+  const box = document.createElement('section');
+  box.setAttribute('aria-label', '관제 대시보드');
+  const add = (parent, tag, value, className) => {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (value !== undefined) node.textContent = String(value);
+    parent.appendChild(node);
+    return node;
+  };
+  const SECRET = /(?:Bearer\s+\S+|sk-[A-Za-z0-9_-]{8,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|(?:api[_ -]?key|authorization|password|token|secret|비밀번호|토큰)\s*[:=]\s*\S+)/giu;
+  const safe = (value) => (typeof value === 'string' && value.length > 0 ? value.replace(SECRET, '[가림]') : '확인 불가');
+  const safeCode = (value) => (typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,64}$/u.test(value) ? value : '확인 불가');
+  const gb = (bytes) => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  const time = (iso) => {
+    const d = new Date(iso);
+    return Number.isFinite(d.getTime()) ? d.toLocaleTimeString('ko-KR', { hour12: false }) : '시각 확인 불가';
+  };
+  const REASON = { query_failed: '조회 실패', permission_denied: '권한 없음', timeout: '시간 초과', unsupported: '이 OS에서 지원 안 함', cancelled: '취소됨', invalid_response: '응답 형식 확인 불가', invalid_sample: '표본 확인 불가' };
+  const reason = (metric) => REASON[metric?.reason] || '이유 확인 불가';
+  const demo = mode === 'demo';
+  const sourceTag = (resource) => {
+    if (resource?.mode === 'demo' || demo) return '[예시]';
+    if (resource?.status === 'error') return resource?.mode === 'connected' ? '[확인 불가]' : '[미연결]';
+    if (resource?.status === 'ok') return '[연결됨]';
+    return '[확인 불가]';
+  };
+
+  add(box, 'h3', '관제 대시보드');
+  add(box, 'p', '[실측] 이 PC에서 잰 값 · [예시] 예제 자료(실제 조회 아님) · [미연결] 보안 서버(SDP)에 연결되지 않음 · [확인 불가] 읽지 못한 값', 'muted');
+
+  // 1) 상태 카드 4개 (2×2)
+  const top = add(box, 'div', undefined, 'grid-2');
+  top.setAttribute('role', 'list');
+  top.setAttribute('aria-label', '상태 카드');
+  const card = (title) => {
+    const c = add(top, 'section', undefined, 'card');
+    c.setAttribute('role', 'listitem');
+    add(c, 'h4', title);
+    return c;
+  };
+
+  // 카드 1: 보안 서버(SDP) 연결
+  const c1 = card('보안 서버(SDP) 연결');
+  if (mode === 'connected') add(c1, 'p', '[연결됨] 연결됨');
+  else if (demo) add(c1, 'p', '[예시] 예제 자료로 표시 중 — 실제 연결 아님');
+  else if (mode === 'disconnected') add(c1, 'p', '[미연결] 연결 없음');
+  else add(c1, 'p', '[확인 불가] 연결 상태를 알 수 없음');
+  add(c1, 'p', '로그인·업무 앱 판정·보안 기록은 이 연결이 있어야 실제 값이 나옵니다.', 'muted');
+
+  // 카드 2: 내 PC
+  const c2 = card('내 PC');
+  const pc = dashState.pc;
+  const m = pc.data?.metrics;
+  if (m) {
+    add(c2, 'p', m.cpu?.state === 'ok' ? `[실측] CPU ${m.cpu.usagePercent}% 사용` : `[확인 불가] CPU — ${reason(m.cpu)}`);
+    add(c2, 'p', m.memory?.state === 'ok' ? `[실측] 메모리 ${gb(m.memory.usedBytes)} / ${gb(m.memory.totalBytes)}` : `[확인 불가] 메모리 — ${reason(m.memory)}`);
+    if (m.firewall?.state === 'ok') {
+      const off = m.firewall.profiles.filter((p) => p.enabled !== true).map((p) => p.name);
+      add(c2, 'p', off.length ? `[실측] 방화벽 꺼짐: ${off.join(', ')}` : '[실측] 방화벽 Domain·Private·Public 켜짐');
+    } else add(c2, 'p', `[확인 불가] 방화벽 — ${reason(m.firewall)}`);
+    add(c2, 'p', `마지막 실측 ${time(pc.data.measuredAt)}`, 'muted');
+  } else if (pc.status === 'loading') add(c2, 'p', '내 PC 값을 읽는 중');
+  else if (pc.status === 'error') add(c2, 'p', `[확인 불가] 읽지 못함 (${safeCode(pc.error?.code)}): ${safe(pc.error?.message)}`);
+  else add(c2, 'p', '아직 읽지 않았습니다. 아래 「내 PC 다시 읽기」를 누르세요.');
+  if (m && pc.status === 'error') add(c2, 'p', `최근 조회 실패 (${safeCode(pc.error?.code)}) — 위 값은 그 전 실측입니다.`, 'muted');
+
+  // 카드 3: 기기·세션
+  const c3 = card('기기·세션');
+  const listLine = (label, resource, badTest) => {
+    if (resource?.status === 'ok' && Array.isArray(resource.data)) {
+      const bad = resource.data.filter(badTest).length;
+      add(c3, 'p', `${sourceTag(resource)} ${label} ${resource.data.length}건${bad ? ` · 주의 ${bad}건` : ''}`);
+    } else if (resource?.status === 'loading') add(c3, 'p', `${label} 불러오는 중`);
+    else add(c3, 'p', `${sourceTag(resource)} ${label} — 값 없음`);
+  };
+  listLine('기기', devices, (d) => d?.status !== 'compliant');
+  listLine('세션', sessions, (s) => s?.status !== 'active');
+
+  // 카드 4: 주의 알림
+  const c4 = card('주의 알림');
+  if (!Array.isArray(notifications)) add(c4, 'p', '[확인 불가] 알림 목록 형식을 확인할 수 없음');
+  else {
+    const failed = notifications.filter((n) => typeof n?.message === 'string' && /연결|불러오지|확인할 수 없/u.test(n.message) && !['devices', 'sessions'].includes(n?.resource)).length;
+    add(c4, 'p', `${demo ? '[예시] ' : ''}${notifications.length}건`);
+    if (failed) add(c4, 'p', `그중 연결·조회 실패 안내 ${failed}건 — 침해·공격 탐지가 아닙니다.`, 'muted');
+    else if (notifications.length === 0) add(c4, 'p', '주의할 알림 없음(조회한 범위 안에서)', 'muted');
+  }
+
+  // 조작: 내 PC 다시 읽기 / 자동 읽기
+  const row = add(box, 'div', undefined, 'row');
+  const reload = add(row, 'button', pc.status === 'loading' ? '읽는 중…' : '내 PC 다시 읽기');
+  reload.type = 'button';
+  reload.dataset.dashFocus = 'reload';
+  if (pc.status === 'loading') { reload.setAttribute('aria-disabled', 'true'); reload.setAttribute('aria-busy', 'true'); }
+  reload.addEventListener('click', () => { dashState.focusKey = 'reload'; dashLoadPc(); });
+  const autoLabel = add(row, 'label');
+  const auto = document.createElement('input');
+  auto.type = 'checkbox';
+  auto.checked = dashState.auto;
+  auto.dataset.dashFocus = 'auto';
+  autoLabel.appendChild(auto);
+  autoLabel.appendChild(document.createTextNode(` ${DASH_AUTO_MS / 1000}초마다 내 PC 읽기 (앱 탭이 보일 때만)`));
+  auto.addEventListener('change', () => { dashState.focusKey = 'auto'; dashSetAuto(auto.checked); dashRefresh(); });
+
+  // 2) 추이: 이번에 앱을 켠 뒤 읽은 최근 실측
+  const trend = add(box, 'section');
+  trend.setAttribute('aria-label', '내 PC 실측 추이');
+  add(trend, 'h4', `추이 — 최근 실측 ${dashState.history.length}회 [실측]`);
+  if (dashState.history.length === 0) add(trend, 'p', '아직 실측 기록이 없습니다.');
+  else {
+    const ol = add(trend, 'ol');
+    for (const h of [...dashState.history].reverse()) {
+      const li = add(ol, 'li');
+      add(li, 'span', `${time(h.at)} · CPU `);
+      if (h.cpu === null) add(li, 'span', '확인 불가');
+      else {
+        const mt = add(li, 'meter');
+        mt.min = 0; mt.max = 100; mt.value = h.cpu;
+        mt.setAttribute('aria-label', `CPU ${h.cpu}%`);
+        add(li, 'span', ` ${h.cpu}%`);
+      }
+      add(li, 'span', ' · 메모리 ');
+      if (h.mem === null) add(li, 'span', '확인 불가');
+      else {
+        const mm = add(li, 'meter');
+        mm.min = 0; mm.max = 100; mm.value = h.mem;
+        mm.setAttribute('aria-label', `메모리 ${h.mem}%`);
+        add(li, 'span', ` ${h.mem}%`);
+      }
+    }
+  }
+  add(trend, 'p', `앱 화면 메모리에만 최대 ${DASH_HISTORY_MAX}회 보관합니다. 새로 고침하면 사라지고, 어디에도 저장·전송하지 않습니다.`, 'muted');
+
+  // 3) 최근 기록
+  const rec = add(box, 'section');
+  rec.setAttribute('aria-label', '최근 기록');
+  add(rec, 'h4', '최근 기록');
+  const ev = m?.events;
+  if (ev?.state === 'ok') add(rec, 'p', `[실측] Windows 기록(System·Application) 최근 24시간 경고 ${ev.warningCount}건 · 오류 ${ev.errorCount}건${ev.truncated ? ` (최대 ${ev.sampleLimit}건까지만 셈)` : ''} — 침해 판정이 아닙니다.`);
+  else if (m) add(rec, 'p', `[확인 불가] Windows 기록 — ${reason(ev)}`);
+  if (Array.isArray(notifications) && notifications.length) {
+    const ul = add(rec, 'ul');
+    for (const n of notifications.slice(0, 3)) add(ul, 'li', `${demo ? '[예시] ' : ''}${safeCode(n?.code)} · ${safe(n?.message)}`);
+    if (notifications.length > 3) add(rec, 'p', `나머지 ${notifications.length - 3}건은 아래 「알림」에 있습니다.`, 'muted');
+  } else if (!m) add(rec, 'p', '표시할 기록이 없습니다.');
+
+  // 다시 그린 뒤 누른 버튼으로 초점을 되돌립니다(키보드 사용자).
+  if (dashState.focusKey) {
+    const key = dashState.focusKey;
+    setTimeout(() => {
+      const target = box.isConnected ? box.querySelector(`[data-dash-focus="${key}"]`) : null;
+      if (target && document.activeElement !== target && (document.activeElement === document.body || !document.activeElement || !document.activeElement.isConnected)) target.focus();
+      if (target) dashState.focusKey = null;
+    }, 0);
+  }
+
+  // 첫 그리기 때 한 번만 읽습니다.
+  if (pc.status === 'idle' && dashApi) setTimeout(() => dashLoadPc(), 0);
+  return box;
+}
+
+export function createStudentView({ api, onChange } = {}) {
+  dashApi = api || null;
+  dashOnChange = typeof onChange === 'function' ? onChange : () => {};
   return {
     renderIdentity({ me, devices, sessions } = {}) {
       const root = document.createElement('section');
@@ -389,7 +611,14 @@ export function createStudentView() {
         return section;
       };
 
-      add(root, 'h3', '케셰브 상태 점검');
+      // 마무리: 관제 대시보드를 맨 위에 둡니다. 실패해도 아래 기존 상태 점검은 그대로 그립니다.
+      try {
+        root.appendChild(buildDashboard({ devices, sessions, notifications, mode }));
+      } catch {
+        add(root, 'p', '관제 대시보드를 그리지 못했습니다. 아래 상태 점검은 그대로 사용할 수 있습니다.');
+      }
+
+      add(root, 'h3', 'Veil 상태 점검');
       add(root, 'p', `전체 자료 모드: ${modeText(mode)}`);
 
       resourceSection('등록 기기', '기기 목록', devices, (section, list) => {
